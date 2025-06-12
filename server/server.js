@@ -132,48 +132,36 @@ app.post('/api/login', async (req, res) => {
         res.status(500).json({ message: 'Terjadi kesalahan pada server.' });
     }
 });
+
+// --- Rute Lupa & Reset Kata Sandi ---
 app.post('/api/forgot-password', async (req, res) => {
     try {
         const { email } = req.body;
         if (!email) return res.status(400).json({ message: 'Email harus diisi.' });
-
         const [users] = await pool.query('SELECT * FROM users WHERE email = ?', [email]);
-
-        // Selalu kirim respons sukses untuk mencegah pencacahan email
         if (users.length === 0) {
-            return res.status(200).json({ message: 'Jika email terdaftar, kode pemulihan telah dikirim.' });
+            return res.status(200).json({ message: 'Jika email terdaftar, link pemulihan telah dikirim.' });
         }
-
         const user = users[0];
+        const resetToken = crypto.randomBytes(32).toString('hex');
+        const expiryDate = new Date(Date.now() + 3600000); // 1 jam
+        await pool.query('UPDATE users SET reset_token = ?, reset_token_expiry = ? WHERE id = ?', [resetToken, expiryDate, user.id]);
 
-        // Hasilkan kode 6 digit yang lebih ramah pengguna
-        const resetCode = crypto.randomInt(100000, 999999).toString();
-        const expiryDate = new Date(Date.now() + 600000); // Kedaluwarsa dalam 10 menit
-
-        // Simpan kode 6 digit (bukan token panjang)
-        await pool.query(
-            'UPDATE users SET reset_token = ?, reset_token_expiry = ? WHERE id = ?',
-            [resetCode, expiryDate, user.id]
-        );
+        const resetLink = `${process.env.FRONTEND_URL}/reset-password/${resetToken}`;
 
         const mailOptions = {
             from: `"CornLeaf AI" <${process.env.GMAIL_USER}>`,
             to: user.email,
-            subject: 'Kode Pemulihan Kata Sandi Anda',
-            html: `<p>Halo ${user.full_name},</p>
-                   <p>Gunakan kode berikut untuk mengatur ulang kata sandi Anda. Jangan bagikan kode ini kepada siapa pun.</p>
-                   <h2 style="font-size:28px; letter-spacing: 4px; text-align:center; background-color:#f0fdf4; padding: 15px; border-radius: 8px;">${resetCode}</h2>
-                   <p>Kode ini akan kedaluwarsa dalam 10 menit. Jika Anda tidak meminta ini, abaikan email ini.</p>`
+            subject: 'Pemulihan Kata Sandi Akun Anda',
+            html: `<p>Halo ${user.full_name},</p><p>Klik link berikut untuk mereset kata sandi Anda: <a href="${resetLink}" style="background-color:#16a34a;color:white;padding:10px 20px;text-decoration:none;border-radius:5px;">Reset Kata Sandi</a></p><p>Link ini akan kedaluwarsa dalam 1 jam. Jika Anda tidak meminta ini, abaikan email ini.</p>`
         };
-
         await transporter.sendMail(mailOptions);
-        res.status(200).json({ message: 'Jika email terdaftar, kode pemulihan telah dikirim.' });
+        res.status(200).json({ message: 'Jika email terdaftar, link pemulihan telah dikirim.' });
     } catch (error) {
         console.error('Forgot password error:', error);
         res.status(500).json({ message: 'Gagal memproses permintaan.' });
     }
 });
-
 
 app.post('/api/reset-password', async (req, res) => {
     try {
