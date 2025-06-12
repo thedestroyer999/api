@@ -1,4 +1,5 @@
-// server.js
+// server.js (Versi Final dengan Health Check)
+
 require('dotenv').config();
 const express = require('express');
 const mysql = require('mysql2/promise');
@@ -11,10 +12,8 @@ const crypto = require('crypto');
 const app = express();
 
 // --- Middleware ---
-// Pastikan CORS mengizinkan domain frontend Anda saat online
-// Anda bisa menggunakan process.env.FRONTEND_URL di sini juga untuk produksi
 app.use(cors({
-    origin: process.env.FRONTEND_URL, // Sesuaikan dengan URL frontend Anda
+    origin: process.env.FRONTEND_URL,
     methods: ['GET', 'POST', 'PUT', 'DELETE'],
     allowedHeaders: ['Content-Type', 'Authorization'],
 }));
@@ -24,25 +23,25 @@ app.use(express.json({ limit: '10mb' }));
 const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-key-that-is-long-and-secure';
 const PORT = process.env.PORT || 3001;
 
-// --- Koneksi Database ---
+// --- Koneksi Database (MENGGUNAKAN CONNECTION POOL) ---
 const dbConfig = {
     host: process.env.DB_HOST || 'localhost',
     user: process.env.DB_USER || 'root',
     password: process.env.DB_PASSWORD || '',
-    database: process.env.DB_NAME || 'cornleafai'
+    database: process.env.DB_NAME || 'cornleafai',
+    waitForConnections: true,
+    connectionLimit: 10,
+    queueLimit: 0
 };
 
-let db;
-async function connectToDatabase() {
-    try {
-        db = await mysql.createConnection(dbConfig);
-        console.log('Successfully connected to MySQL database.');
-    } catch (err) {
-        console.error('Database connection failed:', err.stack);
-        process.exit(1);
-    }
+let pool;
+try {
+    pool = mysql.createPool(dbConfig);
+    console.log('Successfully created MySQL connection pool.');
+} catch (err) {
+    console.error('Database pool creation failed:', err.stack);
+    process.exit(1);
 }
-connectToDatabase();
 
 // --- Konfigurasi Nodemailer ---
 const transporter = nodemailer.createTransport({
@@ -79,6 +78,17 @@ const verifyToken = (req, res, next) => {
 
 // --- Rute API (Direfaktor dengan Async/Await) ---
 
+// ==========================================================
+// PERBAIKAN DI SINI: Rute untuk Health Check Railway
+// ==========================================================
+app.get('/', (req, res) => {
+    res.status(200).json({
+        status: 'success',
+        message: 'Backend API is running and healthy.'
+    });
+});
+
+
 // --- Rute Autentikasi ---
 app.post('/api/register', async (req, res) => {
     try {
@@ -86,12 +96,12 @@ app.post('/api/register', async (req, res) => {
         if (!fullName || !email || !password || password.length < 6) {
             return res.status(400).json({ message: 'Harap isi semua kolom. Kata sandi minimal 6 karakter.' });
         }
-        const [users] = await db.query('SELECT email FROM users WHERE email = ?', [email]);
+        const [users] = await pool.query('SELECT email FROM users WHERE email = ?', [email]);
         if (users.length > 0) {
             return res.status(400).json({ message: 'Email ini sudah terdaftar.' });
         }
         const hashedPassword = await bcrypt.hash(password, 10);
-        await db.query('INSERT INTO users (full_name, email, password) VALUES (?, ?, ?)', [fullName, email, hashedPassword]);
+        await pool.query('INSERT INTO users (full_name, email, password) VALUES (?, ?, ?)', [fullName, email, hashedPassword]);
         res.status(201).json({ message: 'Registrasi berhasil! Silakan login.' });
     } catch (error) {
         console.error('Register error:', error);
@@ -105,7 +115,7 @@ app.post('/api/login', async (req, res) => {
         if (!email || !password) {
             return res.status(400).json({ message: 'Harap masukkan email dan password.' });
         }
-        const [users] = await db.query('SELECT * FROM users WHERE email = ?', [email]);
+        const [users] = await pool.query('SELECT * FROM users WHERE email = ?', [email]);
         if (users.length === 0) {
             return res.status(400).json({ message: 'Email atau kata sandi salah.' });
         }
@@ -122,125 +132,66 @@ app.post('/api/login', async (req, res) => {
         res.status(500).json({ message: 'Terjadi kesalahan pada server.' });
     }
 });
-// --- Rute Lupa Kata Sandi ---
 app.post('/api/forgot-password', async (req, res) => {
     try {
         const { email } = req.body;
+        if (!email) return res.status(400).json({ message: 'Email harus diisi.' });
 
-        // Validasi input email
-        if (!email) {
-            return res.status(400).json({ message: 'Email harus diisi.' });
-        }
+        const [users] = await pool.query('SELECT * FROM users WHERE email = ?', [email]);
 
-        // Cek apakah email terdaftar
-        const [users] = await db.query('SELECT * FROM users WHERE email = ?', [email]);
+        // Selalu kirim respons sukses untuk mencegah pencacahan email
         if (users.length === 0) {
-            // Balasan tetap sama untuk alasan keamanan
-            return res.status(200).json({ message: 'Jika email terdaftar, link pemulihan telah dikirim.' });
+            return res.status(200).json({ message: 'Jika email terdaftar, kode pemulihan telah dikirim.' });
         }
 
         const user = users[0];
 
-        // Buat token dan waktu kadaluarsa (1 jam)
-        const resetToken = crypto.randomBytes(32).toString('hex');
-        const expiryDate = new Date(Date.now() + 3600000); // 1 jam dari sekarang
+        // Hasilkan kode 6 digit yang lebih ramah pengguna
+        const resetCode = crypto.randomInt(100000, 999999).toString();
+        const expiryDate = new Date(Date.now() + 600000); // Kedaluwarsa dalam 10 menit
 
-        // Simpan token dan waktu kedaluwarsa ke database
-        await db.query(
+        // Simpan kode 6 digit (bukan token panjang)
+        await pool.query(
             'UPDATE users SET reset_token = ?, reset_token_expiry = ? WHERE id = ?',
-            [resetToken, expiryDate, user.id]
+            [resetCode, expiryDate, user.id]
         );
 
-        // Buat tautan reset menggunakan variabel environment FRONTEND_URL
-        const resetLink = `${process.env.FRONTEND_URL}/reset-password/${resetToken}`;
-
-        // Konfigurasi email
         const mailOptions = {
             from: `"CornLeaf AI" <${process.env.GMAIL_USER}>`,
             to: user.email,
-            subject: 'Pemulihan Kata Sandi Akun Anda',
-            html: `
-                <p>Halo ${user.full_name},</p>
-                <p>Klik link berikut untuk mereset kata sandi Anda:</p>
-                <p>
-                    <a href="${resetLink}" style="background-color:#16a34a;color:white;padding:10px 20px;text-decoration:none;border-radius:5px;">
-                        Reset Kata Sandi
-                    </a>
-                </p>
-                <p>Link ini akan kedaluwarsa dalam 1 jam. Jika Anda tidak meminta ini, abaikan email ini.</p>
-            `
+            subject: 'Kode Pemulihan Kata Sandi Anda',
+            html: `<p>Halo ${user.full_name},</p>
+                   <p>Gunakan kode berikut untuk mengatur ulang kata sandi Anda. Jangan bagikan kode ini kepada siapa pun.</p>
+                   <h2 style="font-size:28px; letter-spacing: 4px; text-align:center; background-color:#f0fdf4; padding: 15px; border-radius: 8px;">${resetCode}</h2>
+                   <p>Kode ini akan kedaluwarsa dalam 10 menit. Jika Anda tidak meminta ini, abaikan email ini.</p>`
         };
 
-        // Kirim email reset
         await transporter.sendMail(mailOptions);
-
-        // Kirim respons sukses
-        res.status(200).json({ message: 'Jika email terdaftar, link pemulihan telah dikirim.' });
+        res.status(200).json({ message: 'Jika email terdaftar, kode pemulihan telah dikirim.' });
     } catch (error) {
         console.error('Forgot password error:', error);
         res.status(500).json({ message: 'Gagal memproses permintaan.' });
     }
 });
 
-// --- Rute Lupa Kata Sandi (via OTP) ---
-// Langkah 1: Pengguna meminta kode OTP
-app.post('/api/forgot-password', async (req, res) => {
+
+app.post('/api/reset-password', async (req, res) => {
     try {
-        const { email } = req.body;
-
-        // Validasi input
-        if (!email) {
-            return res.status(400).json({ message: 'Email harus diisi.' });
+        const { token, newPassword } = req.body;
+        if (!token || !newPassword || newPassword.length < 6) {
+            return res.status(400).json({ message: 'Token dan kata sandi baru (minimal 6 karakter) diperlukan.' });
         }
-
-        // Cek apakah pengguna ada
-        const [users] = await db.query('SELECT * FROM users WHERE email = ?', [email]);
-
-        // Balasan tetap sama, baik email ditemukan atau tidak
+        const [users] = await pool.query('SELECT * FROM users WHERE reset_token = ? AND reset_token_expiry > NOW()', [token]);
         if (users.length === 0) {
-            return res.status(200).json({ message: 'Jika email Anda terdaftar, kami telah mengirimkan kode verifikasi.' });
+            return res.status(400).json({ message: 'Token tidak valid atau telah kedaluwarsa.' });
         }
-
         const user = users[0];
-
-        // Generate OTP 6 digit
-        const otp = crypto.randomInt(100000, 999999).toString();
-
-        // Waktu kadaluarsa OTP: 10 menit dari sekarang
-        const expiryDate = new Date(Date.now() + 10 * 60 * 1000);
-
-        // Hash OTP untuk keamanan
-        const hashedOtp = await bcrypt.hash(otp, 10);
-
-        // Simpan OTP dan kadaluarsa ke database
-        await db.query(
-            'UPDATE users SET reset_token = ?, reset_token_expiry = ? WHERE id = ?',
-            [hashedOtp, expiryDate, user.id]
-        );
-
-        // Kirim email berisi OTP
-        const mailOptions = {
-            from: `"CornLeaf AI" <${process.env.GMAIL_USER}>`,
-            to: user.email,
-            subject: 'Kode Verifikasi Pemulihan Kata Sandi',
-            html: `
-                <p>Halo ${user.full_name},</p>
-                <p>Gunakan kode berikut untuk mengatur ulang kata sandi Anda. Kode ini berlaku selama 10 menit:</p>
-                <h2 style="background-color:#f0fdf4;color:#166534;padding:10px 20px;text-align:center;border-radius:5px;letter-spacing:2px;">
-                    ${otp}
-                </h2>
-                <p>Jika Anda tidak meminta pemulihan ini, abaikan email ini.</p>
-            `
-        };
-
-        await transporter.sendMail(mailOptions);
-
-        // Kirim respons generik
-        res.status(200).json({ message: 'Jika email Anda terdaftar, kami telah mengirimkan kode verifikasi.' });
-
+        const hashedPassword = await bcrypt.hash(newPassword, 10);
+        await pool.query('UPDATE users SET password = ?, reset_token = NULL, reset_token_expiry = NULL WHERE id = ?', [hashedPassword, user.id]);
+        res.status(200).json({ message: 'Kata sandi berhasil diatur ulang.' });
     } catch (error) {
-        console.error('Forgot password error:', error);
-        res.status(500).json({ message: 'Gagal memproses permintaan.' });
+        console.error('Reset password error:', error);
+        res.status(500).json({ message: 'Gagal mereset kata sandi.' });
     }
 });
 
@@ -249,7 +200,7 @@ app.post('/api/history/save', verifyToken, async (req, res) => {
     try {
         const { detection_result, accuracy, recommendation, image_data } = req.body;
         if (!detection_result || !image_data) return res.status(400).json({ message: 'Data tidak lengkap.' });
-        await db.query('INSERT INTO scan_history (user_id, image_data, detection_result, accuracy, recommendation) VALUES (?, ?, ?, ?, ?)', [req.user.id, image_data, detection_result, accuracy, JSON.stringify(recommendation)]);
+        await pool.query('INSERT INTO scan_history (user_id, image_data, detection_result, accuracy, recommendation) VALUES (?, ?, ?, ?, ?)', [req.user.id, image_data, detection_result, accuracy, JSON.stringify(recommendation)]);
         res.status(201).json({ message: 'Riwayat berhasil disimpan.' });
     } catch (error) {
         console.error('Save history error:', error);
@@ -259,7 +210,7 @@ app.post('/api/history/save', verifyToken, async (req, res) => {
 
 app.get('/api/history', verifyToken, async (req, res) => {
     try {
-        const [history] = await db.query('SELECT id, image_data, detection_result, accuracy, scanned_at FROM scan_history WHERE user_id = ? ORDER BY scanned_at DESC', [req.user.id]);
+        const [history] = await pool.query('SELECT id, image_data, detection_result, accuracy, scanned_at FROM scan_history WHERE user_id = ? ORDER BY scanned_at DESC', [req.user.id]);
         res.json(history);
     } catch (error) {
         console.error('Fetch history error:', error);
@@ -269,7 +220,7 @@ app.get('/api/history', verifyToken, async (req, res) => {
 
 app.delete('/api/history/:id', verifyToken, async (req, res) => {
     try {
-        const [result] = await db.query('DELETE FROM scan_history WHERE id = ? AND user_id = ?', [req.params.id, req.user.id]);
+        const [result] = await pool.query('DELETE FROM scan_history WHERE id = ? AND user_id = ?', [req.params.id, req.user.id]);
         if (result.affectedRows === 0) return res.status(404).json({ message: 'Riwayat tidak ditemukan.' });
         res.status(200).json({ message: 'Riwayat berhasil dihapus.' });
     } catch (error) {
@@ -281,7 +232,7 @@ app.delete('/api/history/:id', verifyToken, async (req, res) => {
 // --- Rute Profil ---
 app.get('/api/profile', verifyToken, async (req, res) => {
     try {
-        const [rows] = await db.query('SELECT id, full_name, email, profile_picture FROM users WHERE id = ?', [req.user.id]);
+        const [rows] = await pool.query('SELECT id, full_name, email, profile_picture FROM users WHERE id = ?', [req.user.id]);
         if (rows.length === 0) return res.status(404).json({ message: 'User tidak ditemukan.' });
         res.json(rows[0]);
     } catch (error) {
@@ -294,9 +245,9 @@ app.put('/api/profile/details', verifyToken, async (req, res) => {
     try {
         const { fullName, profilePicture } = req.body;
         if (!fullName) return res.status(400).json({ message: 'Nama lengkap tidak boleh kosong.' });
-        await db.query('UPDATE users SET full_name = ?, profile_picture = ? WHERE id = ?', [fullName, profilePicture, req.user.id]);
+        await pool.query('UPDATE users SET full_name = ?, profile_picture = ? WHERE id = ?', [fullName, profilePicture, req.user.id]);
         
-        const [users] = await db.query('SELECT id, full_name, email FROM users WHERE id = ?', [req.user.id]);
+        const [users] = await pool.query('SELECT id, full_name, email FROM users WHERE id = ?', [req.user.id]);
         const user = users[0];
         const payload = { user: { id: user.id, email: user.email, fullName: user.full_name } };
         const token = jwt.sign(payload, JWT_SECRET, { expiresIn: '1h' });
@@ -314,12 +265,12 @@ app.put('/api/profile/password', verifyToken, async (req, res) => {
         if (!currentPassword || !newPassword) return res.status(400).json({ message: 'Harap isi semua kolom.' });
         if (newPassword.length < 6) return res.status(400).json({ message: 'Kata sandi baru minimal 6 karakter.' });
         
-        const [users] = await db.query('SELECT password FROM users WHERE id = ?', [req.user.id]);
+        const [users] = await pool.query('SELECT password FROM users WHERE id = ?', [req.user.id]);
         const isMatch = await bcrypt.compare(currentPassword, users[0].password);
         if (!isMatch) return res.status(400).json({ message: 'Kata sandi saat ini salah.' });
         
         const newHashedPassword = await bcrypt.hash(newPassword, 10);
-        await db.query('UPDATE users SET password = ? WHERE id = ?', [newHashedPassword, req.user.id]);
+        await pool.query('UPDATE users SET password = ? WHERE id = ?', [newHashedPassword, req.user.id]);
         
         res.status(200).json({ message: 'Kata sandi berhasil diubah.' });
     } catch (error) {
@@ -333,10 +284,10 @@ app.get('/api/stats', verifyToken, async (req, res) => {
     try {
         const userId = req.user.id;
         const queries = [
-            db.query('SELECT COUNT(*) as totalScans FROM scan_history WHERE user_id = ?', [userId]),
-            db.query("SELECT COUNT(*) as diseasesDetected FROM scan_history WHERE user_id = ? AND detection_result != 'Sehat'", [userId]),
-            db.query('SELECT AVG(accuracy) as averageAccuracy FROM scan_history WHERE user_id = ?', [userId]),
-            db.query('SELECT COUNT(*) as scansThisMonth FROM scan_history WHERE user_id = ? AND MONTH(scanned_at) = MONTH(CURRENT_DATE()) AND YEAR(scanned_at) = YEAR(CURRENT_DATE())', [userId])
+            pool.query('SELECT COUNT(*) as totalScans FROM scan_history WHERE user_id = ?', [userId]),
+            pool.query("SELECT COUNT(*) as diseasesDetected FROM scan_history WHERE user_id = ? AND detection_result != 'Sehat'", [userId]),
+            pool.query('SELECT AVG(accuracy) as averageAccuracy FROM scan_history WHERE user_id = ?', [userId]),
+            pool.query('SELECT COUNT(*) as scansThisMonth FROM scan_history WHERE user_id = ? AND MONTH(scanned_at) = MONTH(CURRENT_DATE()) AND YEAR(scanned_at) = YEAR(CURRENT_DATE())', [userId])
         ];
         const results = await Promise.all(queries.map(p => p.then(res => res[0][0])));
         res.json({
