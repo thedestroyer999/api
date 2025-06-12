@@ -122,24 +122,22 @@ app.post('/api/login', async (req, res) => {
         res.status(500).json({ message: 'Terjadi kesalahan pada server.' });
     }
 });
-
 // --- Rute Lupa & Reset Kata Sandi ---
 app.post('/api/forgot-password', async (req, res) => {
     try {
         const { email } = req.body;
         if (!email) return res.status(400).json({ message: 'Email harus diisi.' });
-        const [users] = await db.query('SELECT * FROM users WHERE email = ?', [email]);
+        const [users] = await pool.query('SELECT * FROM users WHERE email = ?', [email]);
         if (users.length === 0) {
             return res.status(200).json({ message: 'Jika email terdaftar, link pemulihan telah dikirim.' });
         }
         const user = users[0];
         const resetToken = crypto.randomBytes(32).toString('hex');
-        const expiryDate = new Date(Date.now() + 3600000);
-        await db.query('UPDATE users SET reset_token = ?, reset_token_expiry = ? WHERE id = ?', [resetToken, expiryDate, user.id]);
-        
-        // GANTI BAGIAN INI: Menggunakan FRONTEND_URL dari .env
-        const resetLink = `${process.env.FRONTEND_URL}/reset-password/${resetToken}`; 
-        
+        const expiryDate = new Date(Date.now() + 3600000); // 1 jam
+        await pool.query('UPDATE users SET reset_token = ?, reset_token_expiry = ? WHERE id = ?', [resetToken, expiryDate, user.id]);
+
+        const resetLink = `${process.env.FRONTEND_URL}/reset-password/${resetToken}`;
+
         const mailOptions = {
             from: `"CornLeaf AI" <${process.env.GMAIL_USER}>`,
             to: user.email,
@@ -160,13 +158,15 @@ app.post('/api/reset-password', async (req, res) => {
         if (!token || !newPassword || newPassword.length < 6) {
             return res.status(400).json({ message: 'Token dan kata sandi baru (minimal 6 karakter) diperlukan.' });
         }
-        const [users] = await db.query('SELECT * FROM users WHERE reset_token = ? AND reset_token_expiry > NOW()', [token]);
+        // --- FIX #3: Menggunakan UTC_TIMESTAMP() ---
+        const [users] = await pool.query('SELECT * FROM users WHERE reset_token = ? AND reset_token_expiry > UTC_TIMESTAMP()', [token]);
+        
         if (users.length === 0) {
             return res.status(400).json({ message: 'Token tidak valid atau telah kedaluwarsa.' });
         }
         const user = users[0];
         const hashedPassword = await bcrypt.hash(newPassword, 10);
-        await db.query('UPDATE users SET password = ?, reset_token = NULL, reset_token_expiry = NULL WHERE id = ?', [hashedPassword, user.id]);
+        await pool.query('UPDATE users SET password = ?, reset_token = NULL, reset_token_expiry = NULL WHERE id = ?', [hashedPassword, user.id]);
         res.status(200).json({ message: 'Kata sandi berhasil diatur ulang.' });
     } catch (error) {
         console.error('Reset password error:', error);
