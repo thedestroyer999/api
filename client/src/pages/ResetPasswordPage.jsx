@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { KeyRound, Save, AlertCircle, CheckCircle, Leaf } from 'lucide-react';
-
+import { API_ENDPOINTS } from '../config';
 const ResetPasswordPage = () => {
     const { token } = useParams();
     const navigate = useNavigate();

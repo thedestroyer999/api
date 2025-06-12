@@ -5,25 +5,25 @@ import { Briefcase, Building } from 'lucide-react';
 // Mengembalikan path foto ke aset lokal.
 const teamMembers = [
     {
-        photo: '../assets/download.jpeg',
+        photo: '../assets/ygs.jpg',
         name: 'Wahyu Bagas Prastyo',
         role: 'Machine Learning',
         institution: 'Politeknik Negeri Jember',
     },
     {
-        photo: '../assets/download.jpeg',
+        photo: '../assets/siti.jpg',
         name: 'Siti Septiyah Agustin',
         role: 'Machine Learning',
         institution: 'Politeknik Negeri Jember',
     },
     {
-        photo: '../assets/download.jpeg',
+        photo: '../assets/eva.jpg',
         name: 'Eva Yuliana',
         role: 'Machine Learning',
         institution: 'Politeknik Negeri Jember',
     },
     {
-        photo: '../assets/download.jpeg',
+        photo: '../assets/ilhm.jpg',
         name: 'Mohammad Ilham Islamy',
         role: 'Frontend Developer',
         institution: 'Politeknik Negeri Jember',
@@ -35,7 +35,7 @@ const teamMembers = [
         institution: 'Politeknik Negeri Jember',
     },
     {
-        photo: '../assets/download.jpeg',
+        photo: '../assets/reza.jpg',
         name: 'Muhammad Reza Fadlillah',
         role: 'Backend Developer',
         institution: 'Politeknik Negeri Jember',

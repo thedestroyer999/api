@@ -122,29 +122,59 @@ app.post('/api/login', async (req, res) => {
         res.status(500).json({ message: 'Terjadi kesalahan pada server.' });
     }
 });
-// --- Rute Lupa & Reset Kata Sandi ---
+// --- Rute Lupa Kata Sandi ---
 app.post('/api/forgot-password', async (req, res) => {
     try {
         const { email } = req.body;
-        if (!email) return res.status(400).json({ message: 'Email harus diisi.' });
-        const [users] = await pool.query('SELECT * FROM users WHERE email = ?', [email]);
+
+        // Validasi input email
+        if (!email) {
+            return res.status(400).json({ message: 'Email harus diisi.' });
+        }
+
+        // Cek apakah email terdaftar
+        const [users] = await db.query('SELECT * FROM users WHERE email = ?', [email]);
         if (users.length === 0) {
+            // Balasan tetap sama untuk alasan keamanan
             return res.status(200).json({ message: 'Jika email terdaftar, link pemulihan telah dikirim.' });
         }
-        const user = users[0];
-        const resetToken = crypto.randomBytes(32).toString('hex');
-        const expiryDate = new Date(Date.now() + 3600000); // 1 jam
-        await pool.query('UPDATE users SET reset_token = ?, reset_token_expiry = ? WHERE id = ?', [resetToken, expiryDate, user.id]);
 
+        const user = users[0];
+
+        // Buat token dan waktu kadaluarsa (1 jam)
+        const resetToken = crypto.randomBytes(32).toString('hex');
+        const expiryDate = new Date(Date.now() + 3600000); // 1 jam dari sekarang
+
+        // Simpan token dan waktu kedaluwarsa ke database
+        await db.query(
+            'UPDATE users SET reset_token = ?, reset_token_expiry = ? WHERE id = ?',
+            [resetToken, expiryDate, user.id]
+        );
+
+        // Buat tautan reset menggunakan variabel environment FRONTEND_URL
         const resetLink = `${process.env.FRONTEND_URL}/reset-password/${resetToken}`;
 
+        // Konfigurasi email
         const mailOptions = {
             from: `"CornLeaf AI" <${process.env.GMAIL_USER}>`,
             to: user.email,
             subject: 'Pemulihan Kata Sandi Akun Anda',
-            html: `<p>Halo ${user.full_name},</p><p>Klik link berikut untuk mereset kata sandi Anda: <a href="${resetLink}" style="background-color:#16a34a;color:white;padding:10px 20px;text-decoration:none;border-radius:5px;">Reset Kata Sandi</a></p><p>Link ini akan kedaluwarsa dalam 1 jam. Jika Anda tidak meminta ini, abaikan email ini.</p>`
+            html: `
+                <p>Halo ${user.full_name},</p>
+                <p>Klik link berikut untuk mereset kata sandi Anda:</p>
+                <p>
+                    <a href="${resetLink}" style="background-color:#16a34a;color:white;padding:10px 20px;text-decoration:none;border-radius:5px;">
+                        Reset Kata Sandi
+                    </a>
+                </p>
+                <p>Link ini akan kedaluwarsa dalam 1 jam. Jika Anda tidak meminta ini, abaikan email ini.</p>
+            `
         };
+
+        // Kirim email reset
         await transporter.sendMail(mailOptions);
+
+        // Kirim respons sukses
         res.status(200).json({ message: 'Jika email terdaftar, link pemulihan telah dikirim.' });
     } catch (error) {
         console.error('Forgot password error:', error);
@@ -152,25 +182,65 @@ app.post('/api/forgot-password', async (req, res) => {
     }
 });
 
-app.post('/api/reset-password', async (req, res) => {
+// --- Rute Lupa Kata Sandi (via OTP) ---
+// Langkah 1: Pengguna meminta kode OTP
+app.post('/api/forgot-password', async (req, res) => {
     try {
-        const { token, newPassword } = req.body;
-        if (!token || !newPassword || newPassword.length < 6) {
-            return res.status(400).json({ message: 'Token dan kata sandi baru (minimal 6 karakter) diperlukan.' });
+        const { email } = req.body;
+
+        // Validasi input
+        if (!email) {
+            return res.status(400).json({ message: 'Email harus diisi.' });
         }
-        // --- FIX #3: Menggunakan UTC_TIMESTAMP() ---
-        const [users] = await pool.query('SELECT * FROM users WHERE reset_token = ? AND reset_token_expiry > UTC_TIMESTAMP()', [token]);
-        
+
+        // Cek apakah pengguna ada
+        const [users] = await db.query('SELECT * FROM users WHERE email = ?', [email]);
+
+        // Balasan tetap sama, baik email ditemukan atau tidak
         if (users.length === 0) {
-            return res.status(400).json({ message: 'Token tidak valid atau telah kedaluwarsa.' });
+            return res.status(200).json({ message: 'Jika email Anda terdaftar, kami telah mengirimkan kode verifikasi.' });
         }
+
         const user = users[0];
-        const hashedPassword = await bcrypt.hash(newPassword, 10);
-        await pool.query('UPDATE users SET password = ?, reset_token = NULL, reset_token_expiry = NULL WHERE id = ?', [hashedPassword, user.id]);
-        res.status(200).json({ message: 'Kata sandi berhasil diatur ulang.' });
+
+        // Generate OTP 6 digit
+        const otp = crypto.randomInt(100000, 999999).toString();
+
+        // Waktu kadaluarsa OTP: 10 menit dari sekarang
+        const expiryDate = new Date(Date.now() + 10 * 60 * 1000);
+
+        // Hash OTP untuk keamanan
+        const hashedOtp = await bcrypt.hash(otp, 10);
+
+        // Simpan OTP dan kadaluarsa ke database
+        await db.query(
+            'UPDATE users SET reset_token = ?, reset_token_expiry = ? WHERE id = ?',
+            [hashedOtp, expiryDate, user.id]
+        );
+
+        // Kirim email berisi OTP
+        const mailOptions = {
+            from: `"CornLeaf AI" <${process.env.GMAIL_USER}>`,
+            to: user.email,
+            subject: 'Kode Verifikasi Pemulihan Kata Sandi',
+            html: `
+                <p>Halo ${user.full_name},</p>
+                <p>Gunakan kode berikut untuk mengatur ulang kata sandi Anda. Kode ini berlaku selama 10 menit:</p>
+                <h2 style="background-color:#f0fdf4;color:#166534;padding:10px 20px;text-align:center;border-radius:5px;letter-spacing:2px;">
+                    ${otp}
+                </h2>
+                <p>Jika Anda tidak meminta pemulihan ini, abaikan email ini.</p>
+            `
+        };
+
+        await transporter.sendMail(mailOptions);
+
+        // Kirim respons generik
+        res.status(200).json({ message: 'Jika email Anda terdaftar, kami telah mengirimkan kode verifikasi.' });
+
     } catch (error) {
-        console.error('Reset password error:', error);
-        res.status(500).json({ message: 'Gagal mereset kata sandi.' });
+        console.error('Forgot password error:', error);
+        res.status(500).json({ message: 'Gagal memproses permintaan.' });
     }
 });
 
