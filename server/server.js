@@ -1,4 +1,4 @@
-// server.js (Versi Perbaikan dengan Connection Pooling)
+// server.js (Versi Final dengan Health Check)
 
 require('dotenv').config();
 const express = require('express');
@@ -12,9 +12,8 @@ const crypto = require('crypto');
 const app = express();
 
 // --- Middleware ---
-// Pastikan CORS mengizinkan domain frontend Anda saat online
 app.use(cors({
-    origin: process.env.FRONTEND_URL, // Sesuaikan dengan URL frontend Anda di Railway
+    origin: process.env.FRONTEND_URL,
     methods: ['GET', 'POST', 'PUT', 'DELETE'],
     allowedHeaders: ['Content-Type', 'Authorization'],
 }));
@@ -31,7 +30,7 @@ const dbConfig = {
     password: process.env.DB_PASSWORD || '',
     database: process.env.DB_NAME || 'cornleafai',
     waitForConnections: true,
-    connectionLimit: 10, // Jumlah koneksi maksimum dalam pool
+    connectionLimit: 10,
     queueLimit: 0
 };
 
@@ -78,6 +77,17 @@ const verifyToken = (req, res, next) => {
 };
 
 // --- Rute API (Direfaktor dengan Async/Await) ---
+
+// ==========================================================
+// PERBAIKAN DI SINI: Rute untuk Health Check Railway
+// ==========================================================
+app.get('/', (req, res) => {
+    res.status(200).json({
+        status: 'success',
+        message: 'Backend API is running and healthy.'
+    });
+});
+
 
 // --- Rute Autentikasi ---
 app.post('/api/register', async (req, res) => {
@@ -130,16 +140,15 @@ app.post('/api/forgot-password', async (req, res) => {
         if (!email) return res.status(400).json({ message: 'Email harus diisi.' });
         const [users] = await pool.query('SELECT * FROM users WHERE email = ?', [email]);
         if (users.length === 0) {
-            // Tetap kirim respons sukses untuk mencegah penyerang menebak email yang terdaftar
             return res.status(200).json({ message: 'Jika email terdaftar, link pemulihan telah dikirim.' });
         }
         const user = users[0];
         const resetToken = crypto.randomBytes(32).toString('hex');
         const expiryDate = new Date(Date.now() + 3600000); // 1 jam
         await pool.query('UPDATE users SET reset_token = ?, reset_token_expiry = ? WHERE id = ?', [resetToken, expiryDate, user.id]);
-        
-        const resetLink = `${process.env.FRONTEND_URL}/reset-password/${resetToken}`; 
-        
+
+        const resetLink = `${process.env.FRONTEND_URL}/reset-password/${resetToken}`;
+
         const mailOptions = {
             from: `"CornLeaf AI" <${process.env.GMAIL_USER}>`,
             to: user.email,
